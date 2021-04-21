@@ -1,4 +1,4 @@
-# 20201 FoRTE EGU
+# 2021 FoRTE EGU
 
 Supplementary data, materials, and resources for the poster Dorheim, K., Bond-Lamberty, B., Gough, C., Haber, L., and Shiklomanov, A.: Modeling FoRTE, the Forest Resilience Threshold Experiment, EGU General Assembly 2021, online, 19–30 Apr 2021, EGU21-7893, https://doi.org/10.5194/egusphere-egu21-7893, 2021.
 
