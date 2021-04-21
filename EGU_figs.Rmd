@@ -1,0 +1,308 @@
+---
+title: "BBL April FoRTE Catch Up"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+    toc_float: yes
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+
+```{r setup, include=FALSE, message=FALSE, echo = FALSE, cache = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+library(dplyr)
+library(ggplot2)
+library(segmented)
+library(zoo)
+library(tibbletime)
+library(assertthat)
+library(data.table)
+
+BASE_DIR <- "/Users/dorh012/projects/2021/FoRTE/2021_FoRTE_EGU"
+INPUT_DIR <- BASE_DIR
+
+# Define the color themes and the graphing aesthetics. 
+THEME <- theme_bw()
+ALPHA <- 0.05
+BCK_GRND1 <- '#dcffcc'
+BCK_GRND2 <- '#9fdfcd'
+BCK_GRND3 <- '#baabda'
+FORTE_SEVERITY_COLORS <- c("#000000", "#009E73", "#0072B2", "#D55E00")
+names(FORTE_SEVERITY_COLORS) <- c('0 %', '45 %', '65 %', '85 %')
+
+
+
+# Add the severity label names to make is so that it is easy to use the FORTE color palates 
+# Args 
+#   dt: data frame of FoRTE data must have a scn column
+add_severity_lables <- function(dt){
+  
+  out <- dt[ , severity := gsub(pattern = "harvest_|_1day_above", replacement = "", x = scn)]
+  out$severity <- paste0(out$severity, " %")
+  return(out)
+  
+}
+
+
+# There is a problem some negative values, or also 0 values... this needs to be addressed some how! 
+# Calculate the log ratio for disturbance this is the data that is used to calcualte the dimensions of stability metrics 
+# Args 
+#   d: a data frame of ED data it must include the baseline scennario! 
+# Rertun: a data frame with the value now beinng the log(treatment/baseline)
+ln_disturbance <- function(d){
+
+  # Check inputs 
+  req_names <- c('scn', 'year', 'variable', 'description', 'unit', 'value', 'met')
+  assert_that(all(has_name(d, req_names)))
+  
+  baseline_scn <- "harvest_0_1day_above" 
+  assert_that(baseline_scn %in% d$scn)
+
+  # Separate the control or baseline scneario values from the output from the other 
+  # treatment groups. 
+  baseline_values <- d[scn == baseline_scn][ , c("year", "variable", "value", "met")]
+  names(baseline_values) <- c("year", "variable", "baseline", "met")
+  treatment_values <- d[scn != baseline_scn][ , c("scn", "year", "variable", "description", 
+                                                  "unit", "treatment" = "value", "met")]
+  names(treatment_values) <- c("scn", "year", "variable", "description", 
+                               "unit", "treatment", "met")
+
+  # Combine the control and the treatment values as a wide df, then take the 
+  # ln(treatment/control) per year / variable / met realization. 
+  disturbance_d <- treatment_values[baseline_values, on = c("year", "variable", "met")]
+  disturbance_d$year <- disturbance_d$year - 2019
+  disturbance_d <- disturbance_d[year >= 0]
+  disturbance_d <- disturbance_d[ , value := log(treatment/baseline)]
+  
+  return(disturbance_d)
+}
+
+
+
+#carbon_flux_var_names <- c("AGB", "GPP", "NPP", "Rh", "NEP")
+carbon_flux_var_names <- c("GPP", "NPP", "Rh", "NEP")
+
+list.files(INPUT_DIR, "exp-constant-yr.csv", full.names = TRUE) %>% 
+  read.csv(stringsAsFactors = FALSE) %>% 
+  as.data.table %>% 
+  add_severity_lables() %>% 
+  dplyr::filter(variable %in% carbon_flux_var_names) -> 
+  ED_outputs
+
+ED_outputs$variable <- factor(ED_outputs$variable, levels = carbon_flux_var_names, ordered = TRUE)
+
+```
+
+
+
+
+
+# Disturbance 
+
+
+What does the disturbance response look like? 
+
+
+```{r, fig.width=17, fig.height=11}
+ED_outputs %>% 
+  ln_disturbance()  %>% 
+  add_severity_lables() -> 
+  disturbance_df
+
+disturbance_df %>% 
+  ggplot() + 
+  geom_line(aes(year, value, color = severity, line = met), alpha = 0.5, size = 1.25) + 
+    geom_hline(yintercept = 0, linetype = 2, size = 1) +
+  facet_wrap("variable", scales = "free") + 
+  labs(x = 'Years since disturbance', y = "ln(disturbance/control)") + 
+  scale_color_manual(values = FORTE_SEVERITY_COLORS) + 
+  theme_bw(base_size = 20) +
+  theme(legend.position = "none") + 
+  ggsave(file.path(BASE_DIR,"response.png"), width = 9, height = 6)
+```
+
+# Resistance 
+
+
+Comparison of the two different methods used to calculate resistance. 
+
+```{r}
+# Clculate the resistance of the trough and when that trough occurs 
+# Args:
+#   data: ED data! 
+# Return: a data frame of the trough resistance value 
+through_resistance <- function(data){
+  
+  d <- ln_disturbance(data)
+  
+  dd <- d[, .(year, scn, variable, met, value)]
+  info <- unique(data[, .(variable, description)])
+  
+  rslt <- do.call(what = "rbind", 
+        args = split(dd, interaction(dd$scn, dd$variable, dd$met), drop = TRUE) %>% 
+          lapply(function(x){
+            index <- which.min(x$value)
+            out <- x[index, ]
+            out <- out[ , .(scn, trough_year = year, variable, met, trough_resistance = value)]
+            return(out)
+          }))
+  
+  out <- rslt[info, on = "variable"]
+  out$unit <- "unitless"
+  
+  return(out)
+  
+}
+
+ED_outputs %>% 
+  through_resistance() %>% 
+  add_severity_lables() %>% 
+  na.omit() %>% 
+  rename(value = trough_resistance) %>%
+  mutate(type = "trough resistance") -> 
+  trough_resistance
+
+ED_outputs  %>%
+  ln_disturbance() %>%  
+  na.omit() %>% 
+  add_severity_lables() %>% 
+  filter(year == 0) %>% 
+  mutate(type = "yr resistance") -> 
+  yr_resistance
+```
+
+
+# Resilience
+
+
+```{r}
+disturbance_df %>% 
+  left_join(select(trough_resistance, met, variable, severity, trough_year)) %>% 
+  dplyr::filter(year >= trough_year) %>% 
+  dplyr::mutate(year = year - trough_year) %>% 
+  select(-trough_year) -> 
+  resillience_data1
+```
+
+
+
+
+```{r}
+df_list <- split(resillience_data1, 
+                 interaction(resillience_data1$scn, resillience_data1$variable, resillience_data1$met, sep = "~"), 
+                 drop = TRUE)
+df_list1 <- df_list
+
+fit_data <- function(d){
+
+  x <- d$year
+  y <- d$value
+  
+  lin.mod <- lm(y ~ x)
+  segmented.mod <- lin.mod
+  tryCatch({
+    segmented.mod <- segmented(lin.mod, seg.Z = ~x)
+    }, 
+    error = function(e){lin.mod})
+  
+  
+  out <- list("lin.mod" = lin.mod, "seg.mod" = segmented.mod)
+  return(out)
+
+}
+
+extract_fit_data <- function(l, n){
+  
+  ln_slope <- l[["lin.mod"]]$coefficients[2]
+
+  # If it was determined that there was no segment
+  if(length(l[["seg.mod"]]) == 12){
+    seg_slope1 <- l[["seg.mod"]]$coefficients[2]
+    seg_slope2 <- NA
+    seg_brk <- NA 
+    
+  } else {
+    slopes <- slope(l[["seg.mod"]])
+    seg_slope1 <- slopes$x[1,1] # Extract the slope of the first segment
+    seg_slope2 <- slopes$x[2,1] # Extract the slope of the second segment
+    seg_brk <- l[["seg.mod"]]$psi[1,3] # Extract the year of the break point 
+  }
+  
+  # Extract the data about the fit. 
+  info <- unlist(strsplit(n, split = "~"))
+  
+  # Format the slope into a data table 
+  dt <- data.table(scn = info[1], 
+                   variable = info[2], 
+                   met = info[3],
+                   lin_slope = ln_slope, 
+                   seg_slope1 = seg_slope1, 
+                   seg_slope2 = seg_slope2, 
+                   seg_brk = seg_brk) 
+
+}
+
+fits <- lapply(df_list, fit_data)
+fits1 <- fits
+mapply(FUN = extract_fit_data, l = fits, n = names(fits), SIMPLIFY = FALSE) %>% 
+  do.call(what = "rbind") %>%  
+  add_severity_lables() -> 
+  compare_slope_fits1
+```
+
+
+```{r, fig.width=17, fig.height=11}
+compare_slope_fits1[trough_resistance, on = c("scn",  "variable", "met")] %>% 
+  mutate(severity = paste0(severity, " %")) -> 
+  wide_data 
+
+wide_data %>%
+  ggplot(aes(value,seg_slope1, color = severity)) + 
+  geom_point(size = 3) + 
+  facet_wrap('variable', scales = "free") + 
+  theme_bw() +
+  THEME + 
+  labs(x = "Resistance (initial response)", 
+       y = "Resilience (rate of recovery)") + 
+  scale_color_manual(values = FORTE_SEVERITY_COLORS) + 
+      theme_bw(base_size = 20) +
+  theme(legend.position = "none") + 
+  ggsave(file.path(BASE_DIR, "scatter_plot.png"), width = 9, height = 6)
+```
+
+```{r}
+list.files(file.path(BASE_DIR, "met_results"), "constant_yr", 
+           full.names = TRUE) %>% 
+  lapply(function(x){
+    
+    d <- read.csv(x, stringsAsFactors = FALSE)
+    d$met <- gsub(pattern = "NARR-ED2_|-constant_yr.csv", replacement = "", x = basename(x))
+    
+    return(d)
+ 
+  }) %>% 
+  do.call(what = "rbind") -> 
+  met_data
+```
+
+```{r, fig.width=6, fig.height=3}
+met_data %>% 
+  select(prate, tmp, met) %>%  
+  distinct() %>% 
+  dplyr::left_join(wide_data, by = "met") %>% 
+    dplyr::filter(variable %in% c("GPP", "Rh")) %>% 
+  ggplot(aes(tmp, value, color = severity)) + 
+  geom_point(size = 6) + 
+  facet_wrap("variable", scales = "free") + 
+  THEME + 
+  scale_color_manual(values = FORTE_SEVERITY_COLORS) +
+  labs(x = "Average Annual Temperature (K)", y = "Resistance (unitless)") + 
+  theme(legend.position = "none") + 
+      theme_bw(base_size = 20) +
+  theme(legend.position = "none") + 
+  ggsave(file.path(BASE_DIR, "met.png"), width = 10, height = 6)
+```
